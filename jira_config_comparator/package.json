@@ -1,0 +1,41 @@
+{
+  "name": "jira-config-comparator",
+  "version": "1.0.0",
+  "description": "A comprehensive Node.js script to compare configurations between source and target JIRA Cloud instances",
+  "main": "jira-config-comparator.js",
+  "bin": {
+    "jira-config-comparator": "./jira-config-comparator.js"
+  },
+  "scripts": {
+    "start": "node jira-config-comparator.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "jira",
+    "configuration",
+    "comparison",
+    "atlassian",
+    "cloud",
+    "api",
+    "issue-types",
+    "priority-schemes",
+    "sprint-configuration"
+  ],
+  "author": "JIRA Configuration Expert",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "node-fetch": "^2.7.0",
+    "commander": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/jira-config-comparator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/jira-config-comparator/issues"
+  },
+  "homepage": "https://github.com/your-org/jira-config-comparator#readme"
+}
