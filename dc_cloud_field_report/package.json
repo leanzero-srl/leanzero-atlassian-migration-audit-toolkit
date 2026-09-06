@@ -1,0 +1,14 @@
+{
+  "name": "dc-cloud-field-report",
+  "version": "1.0.0",
+  "description": "Audit which Data Center custom fields exist on Jira Cloud, and why the rest do not.",
+  "main": "field_report.js",
+  "scripts": {
+    "start": "node field_report.js"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "find-missing-issues",
+  "version": "0.1.0",
+  "description": "Audit script: list Jira work items present in DC but missing in Cloud, one Excel tab per project.",
+  "main": "main/find_missing_issues.js",
+  "scripts": {
+    "start": "node main/find_missing_issues.js",
+    "syntax-check": "for f in main/find_missing_issues.js src/*.js; do node --check \"$f\" || exit 1; done && echo ALL_OK"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "exceljs": "^4.4.0"
+  },
+  "license": "Apache-2.0"
+}
