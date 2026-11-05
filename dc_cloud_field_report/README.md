@@ -25,6 +25,11 @@ Outputs to `./out/`:
   produced false "not on Cloud" rows. Always use `/field/search` for completeness.
 - Matching is by field **name** (exact, then ignoring a trailing `(migrated)` suffix,
   which JCMA sometimes appends). Cloud field IDs differ from DC, so name is the join key.
+- Field names are not unique. When several fields share a name, each Cloud field is
+  matched to one DC field only, same field type first; a DC field left without a Cloud
+  field of its own goes to the NOT on Cloud sheet with that reason. The Note column
+  says how many Cloud fields share the name, and when the matched types differ.
+- Tests: `npm test` (offline).
 
 ## Env
 

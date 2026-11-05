@@ -159,8 +159,9 @@ Target: 3 items
 - Verifies priority scheme assignments
 
 ### Sprint Configuration
-- Compares Agile board configurations
-- Checks board names, types, and sprint settings
+- Lists every Agile board on both sides and matches them by name and type, counting
+  boards that share a name (a missing second "ABC board" is reported)
+- Fetches the per-board configuration for the first 20 boards only
 - Requires JIRA Software (Agile) to be installed
 
 ### Time Tracking Configuration
@@ -168,6 +169,15 @@ Target: 3 items
 - Checks working days, hours per day, and time formats
 - Verifies time tracking field configurations
 - Compares list configurations for time tracking display
+
+### Items that share a name
+Items are matched by name (case-insensitive), and a Cloud site with team-managed
+projects has many items that share one: every such project carries its own "Bug",
+"Task" and "In Review" status. Within a name, identical items are paired first, the
+rest are paired by the fewest differing fields, and anything left over is reported
+as missing in target or extra in target. A site compared with itself reports no
+differences. Site-specific values are ignored: ids, `self` links and other URLs at
+any depth, and the order in which the API returns fields.
 
 ## Troubleshooting
 
@@ -238,6 +248,11 @@ The script uses the following JIRA REST API endpoints:
 ### Running in Development
 ```bash
 node jira-config-comparator.js --source ... --target ... --email ... --token ...
+```
+
+### Tests
+```bash
+npm test   # node --test, offline, against the shipped comparator class
 ```
 
 ## Support

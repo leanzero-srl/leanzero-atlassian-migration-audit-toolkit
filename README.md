@@ -75,7 +75,8 @@ all. On that project, not a different one.
 
 **Field name matching has false twins.** Two fields called `Segment`, one of them a
 `(migrated)`-suffixed duplicate, are not the same field. The report shows both; it is your job to
-decide, not the tool's to guess.
+decide, not the tool's to guess. When several fields share an exact name, each Cloud field is matched
+to one DC field only (same type first), and the Note column says how many share the name.
 
 ---
 
