@@ -23,6 +23,28 @@ const { program } = require("commander");
 const fs = require("fs").promises;
 const path = require("path");
 
+// Every list-shaped configuration area: one table drives the report sections, the
+// critical summary and the closing summary, so they always describe the same diff.
+const LIST_SECTIONS = [
+  { configKey: "issueTypes", title: "ISSUE TYPES", summaryName: "Issue Types", itemType: "issueType", group: "core", summaryOrder: 1 },
+  { configKey: "issueTypeSchemes", title: "ISSUE TYPE SCHEMES", summaryName: "Issue Type Schemes", itemType: "scheme", group: "core", summaryOrder: 2 },
+  { configKey: "issueLinkTypes", title: "ISSUE LINK TYPES", summaryName: "Issue Link Types", itemType: "linkType", group: "core", summaryOrder: 3 },
+  { configKey: "prioritySchemes", title: "PRIORITY SCHEMES", summaryName: "Priority Schemes", itemType: "priorityScheme", group: "core", summaryOrder: 4 },
+  { configKey: "priorities", title: "PRIORITIES", summaryName: "Priorities", itemType: "priority", group: "core", summaryOrder: 5 },
+  { configKey: "workflows", title: "WORKFLOWS", summaryName: "Workflows", itemType: "workflow", group: "comprehensive", summaryOrder: 7 },
+  { configKey: "workflowSchemes", title: "WORKFLOW SCHEMES", summaryName: "Workflow Schemes", itemType: "workflowScheme", group: "comprehensive", summaryOrder: 8 },
+  { configKey: "customFields", title: "CUSTOM FIELDS", summaryName: "Custom Fields", itemType: "customField", group: "comprehensive", summaryOrder: 9 },
+  { configKey: "fieldConfigurations", title: "FIELD CONFIGURATIONS", summaryName: "Field Configurations", itemType: "fieldConfiguration", group: "comprehensive", summaryOrder: 10 },
+  { configKey: "screenSchemes", title: "SCREEN SCHEMES", summaryName: "Screen Schemes", itemType: "screenScheme", group: "comprehensive", summaryOrder: 11 },
+  { configKey: "permissionSchemes", title: "PERMISSION SCHEMES", summaryName: "Permission Schemes", itemType: "permissionScheme", group: "comprehensive", summaryOrder: 12 },
+  { configKey: "notificationSchemes", title: "NOTIFICATION SCHEMES", summaryName: "Notification Schemes", itemType: "notificationScheme", group: "comprehensive", summaryOrder: 13 },
+  { configKey: "issueSecuritySchemes", title: "ISSUE SECURITY SCHEMES", summaryName: "Issue Security Schemes", itemType: "securityScheme", group: "comprehensive", summaryOrder: 14 },
+  { configKey: "projectCategories", title: "PROJECT CATEGORIES", summaryName: "Project Categories", itemType: "category", group: "comprehensive", summaryOrder: 15 },
+  { configKey: "resolutions", title: "RESOLUTIONS", summaryName: "Resolutions", itemType: "resolution", group: "comprehensive", summaryOrder: 16 },
+  { configKey: "statuses", title: "STATUSES", summaryName: "Statuses", itemType: "status", group: "comprehensive", summaryOrder: 17 },
+];
+const TIME_TRACKING_SUMMARY_ORDER = 6;
+
 class JIRAConfigComparator {
   constructor(sourceUrl, targetUrl, email, apiToken, options = {}) {
     this.sourceUrl = sourceUrl.replace(/\/$/, "");
@@ -811,7 +833,9 @@ class JIRAConfigComparator {
   }
 
   // Get issue hierarchy (project configurations)
-  async getIssueHierarchy(baseUrl) {
+  // onlyKeys: analyse just these project keys (the target side passes the source's
+  // keys, so both sides look at the same projects even past the 100-project cap).
+  async getIssueHierarchy(baseUrl, onlyKeys = null) {
     // Get all projects (this endpoint returns a direct array, not paginated)
     const projects = await this.makeApiCall(baseUrl, "/rest/api/3/project");
     if (!projects) return null;
@@ -826,7 +850,8 @@ class JIRAConfigComparator {
           project.key &&
           project.name &&
           !project.archived &&
-          project.projectTypeKey !== "template",
+          project.projectTypeKey !== "template" &&
+          (!onlyKeys || onlyKeys.has(project.key)),
       )
       .slice(0, 100); // Reasonable limit for comparison
 
@@ -901,29 +926,28 @@ class JIRAConfigComparator {
 
     console.log(`Found ${boards.length} boards`);
 
-    const sprintConfigs = [];
+    // Every board is listed (name and type are compared for all of them); the
+    // per-board configuration is fetched for the first 20 only to keep calls down.
+    // Listing only the first 20 boards made two sites with >20 boards look
+    // different whenever their board order differed.
+    const sprintConfigs = boards.map((board) => ({
+      boardId: board.id,
+      boardName: board.name,
+      boardType: board.type,
+      sprintConfig: null,
+    }));
+    const boardsToAnalyze = sprintConfigs.slice(0, 20);
+    console.log(`Analyzing ${boardsToAnalyze.length} board configurations`);
 
-    // Get configuration for each board (limit to first 20 to avoid overwhelming)
-    const boardsToAnalyze = boards.slice(0, 20);
-    console.log(`Analyzing ${boardsToAnalyze.length} boards`);
-
-    for (const board of boardsToAnalyze) {
+    for (const entry of boardsToAnalyze) {
       try {
-        const config = await this.makeApiCall(
+        entry.sprintConfig = await this.makeApiCall(
           baseUrl,
-          `/rest/agile/1.0/board/${board.id}/configuration`,
+          `/rest/agile/1.0/board/${entry.boardId}/configuration`,
         );
-        if (config) {
-          sprintConfigs.push({
-            boardId: board.id,
-            boardName: board.name,
-            boardType: board.type,
-            sprintConfig: config,
-          });
-        }
       } catch (error) {
         console.warn(
-          `Could not get configuration for board ${board.name} (${board.id}):`,
+          `Could not get configuration for board ${entry.boardName} (${entry.boardId}):`,
           error.message,
         );
       }
@@ -1301,7 +1325,12 @@ class JIRAConfigComparator {
       issueLinkTypes: await this.getIssueLinkTypes(this.targetUrl),
       prioritySchemes: await this.getPrioritySchemes(this.targetUrl),
       priorities: await this.getPriorities(this.targetUrl),
-      issueHierarchy: await this.getIssueHierarchy(this.targetUrl),
+      issueHierarchy: await this.getIssueHierarchy(
+        this.targetUrl,
+        this.sourceConfig.issueHierarchy
+          ? new Set(this.sourceConfig.issueHierarchy.map((p) => p.projectKey))
+          : null,
+      ),
       sprintConfig: await this.getSprintConfiguration(this.targetUrl),
       timeTrackingConfig: await this.getTimeTrackingConfiguration(
         this.targetUrl,
@@ -1400,86 +1429,181 @@ class JIRAConfigComparator {
     const sourceKeys = new Set(sourceItems.keys());
     const targetKeys = new Set(targetItems.keys());
 
-    const missingInTarget = [...sourceKeys].filter(
-      (key) => !targetKeys.has(key),
-    );
-    const extraInTarget = [...targetKeys].filter((key) => !sourceKeys.has(key));
-    const commonKeys = [...sourceKeys].filter((key) => targetKeys.has(key));
-
+    const asGroup = (entry) => (Array.isArray(entry) ? entry : [entry]);
+    const missingInTarget = [];
+    const extraInTarget = [];
     const differences = [];
 
+    for (const key of sourceKeys) {
+      if (!targetKeys.has(key)) missingInTarget.push(...asGroup(sourceItems.get(key)));
+    }
+    for (const key of targetKeys) {
+      if (!sourceKeys.has(key)) extraInTarget.push(...asGroup(targetItems.get(key)));
+    }
+
+    const commonKeys = [...sourceKeys].filter((key) => targetKeys.has(key));
+
     for (const key of commonKeys) {
-      const sourceItem = sourceItems.get(key);
-      const targetItem = targetItems.get(key);
+      // Several items can share a name (team-managed projects each carry their own
+      // "Bug", "In Review", ...). Pair each source item with ONE target item instead
+      // of comparing every source item with every target item, which reported
+      // same-named siblings as differences even when a site was compared with itself.
+      const { pairs, unmatchedSource, unmatchedTarget } = this.pairItems(
+        asGroup(sourceItems.get(key)),
+        asGroup(targetItems.get(key)),
+        itemType,
+      );
+      missingInTarget.push(...unmatchedSource);
+      extraInTarget.push(...unmatchedTarget);
 
-      // Handle both single items and arrays of duplicate items
-      const sourceItemsToCompare = Array.isArray(sourceItem)
-        ? sourceItem
-        : [sourceItem];
-      const targetItemsToCompare = Array.isArray(targetItem)
-        ? targetItem
-        : [targetItem];
+      for (const [sItem, tItem] of pairs) {
+        // Check for meaningful differences with severity scoring
+        const diffResult = this.hasMeaningfulDifferencesWithSeverity(
+          sItem,
+          tItem,
+          keyField,
+          itemType,
+        );
 
-      // Compare each source item with each target item
-      for (const sItem of sourceItemsToCompare) {
-        for (const tItem of targetItemsToCompare) {
-          // Clean items for comparison (remove self URLs and timestamps)
-          const sourceClean = this.cleanItem(sItem);
-          const targetClean = this.cleanItem(tItem);
+        if (diffResult.hasDifferences) {
+          // Filter by severity threshold if specified
+          if (this.options.severityThreshold) {
+            const thresholdOrder = {
+              low: 1,
+              medium: 2,
+              high: 3,
+              critical: 4,
+            };
+            const diffOrder = thresholdOrder[diffResult.severity] || 0;
+            const thresholdOrderVal =
+              thresholdOrder[this.options.severityThreshold] || 0;
 
-          // Check for meaningful differences with severity scoring
-          const diffResult = this.hasMeaningfulDifferencesWithSeverity(
-            sItem,
-            tItem,
-            keyField,
-            itemType,
-          );
-
-          if (diffResult.hasDifferences) {
-            // Filter by severity threshold if specified
-            if (this.options.severityThreshold) {
-              const thresholdOrder = {
-                low: 1,
-                medium: 2,
-                high: 3,
-                critical: 4,
-              };
-              const diffOrder = thresholdOrder[diffResult.severity] || 0;
-              const thresholdOrderVal =
-                thresholdOrder[this.options.severityThreshold] || 0;
-
-              if (diffOrder < thresholdOrderVal) {
-                continue; // Skip this difference as it's below threshold
-              }
+            if (diffOrder < thresholdOrderVal) {
+              continue; // Skip this difference as it's below threshold
             }
-
-            differences.push({
-              key,
-              name: sItem[nameField] || key,
-              source: this.cleanItemEnhanced(sItem, itemType),
-              target: this.cleanItemEnhanced(tItem, itemType),
-              severity: diffResult.severity,
-              reason: diffResult.reason,
-              importance: this.categorizeItemImportance(sItem, itemType),
-            });
           }
+
+          differences.push({
+            key,
+            name: sItem[nameField] || key,
+            sourceId: sItem.id,
+            targetId: tItem.id,
+            source: this.cleanItemEnhanced(sItem, itemType),
+            target: this.cleanItemEnhanced(tItem, itemType),
+            severity: diffResult.severity,
+            reason: diffResult.reason,
+            importance: this.categorizeItemImportance(sItem, itemType),
+          });
         }
       }
     }
 
     return {
-      missingInTarget: missingInTarget.flatMap((key) => {
-        const item = sourceItems.get(key);
-        return Array.isArray(item) ? item : [item];
-      }),
-      extraInTarget: extraInTarget.flatMap((key) => {
-        const item = targetItems.get(key);
-        return Array.isArray(item) ? item : [item];
-      }),
+      missingInTarget,
+      extraInTarget,
       differences,
-      sourceCount: (sourceList || []).length,
-      targetCount: (targetList || []).length,
+      sourceCount: sourceArray.length,
+      targetCount: targetArray.length,
     };
+  }
+
+  // Pair the items that share one comparison key (name). Identical items pair first
+  // (so a site compared with itself, or an unchanged migration, yields no
+  // difference); the rest pair by fewest differing fields; whatever is left over is
+  // genuinely missing in target (source side) or extra in target (target side).
+  pairItems(sourceGroup, targetGroup, itemType = "") {
+    const signature = (item) =>
+      this.stableStringify(this.cleanItemEnhanced(item, itemType));
+    const targetSigs = targetGroup.map(signature);
+    const usedTarget = new Set();
+    const pairs = [];
+    const leftoverSource = [];
+
+    sourceGroup.forEach((sItem) => {
+      const sig = signature(sItem);
+      const j = targetSigs.findIndex(
+        (tSig, idx) => !usedTarget.has(idx) && tSig === sig,
+      );
+      if (j >= 0) {
+        usedTarget.add(j);
+        pairs.push([sItem, targetGroup[j]]);
+      } else {
+        leftoverSource.push(sItem);
+      }
+    });
+
+    // Closest remaining pairs first; ties keep the API order (stable sort).
+    const candidates = [];
+    leftoverSource.forEach((sItem, si) => {
+      targetGroup.forEach((tItem, ti) => {
+        if (usedTarget.has(ti)) return;
+        candidates.push({
+          si,
+          ti,
+          score: this.countDifferingFields(sItem, tItem, itemType),
+        });
+      });
+    });
+    candidates.sort((a, b) => a.score - b.score);
+    const usedSource = new Set();
+    for (const { si, ti } of candidates) {
+      if (usedSource.has(si) || usedTarget.has(ti)) continue;
+      usedSource.add(si);
+      usedTarget.add(ti);
+      pairs.push([leftoverSource[si], targetGroup[ti]]);
+    }
+
+    return {
+      pairs,
+      unmatchedSource: leftoverSource.filter((_, si) => !usedSource.has(si)),
+      unmatchedTarget: targetGroup.filter((_, ti) => !usedTarget.has(ti)),
+    };
+  }
+
+  countDifferingFields(sourceItem, targetItem, itemType = "") {
+    const s = this.cleanItemEnhanced(sourceItem, itemType);
+    const t = this.cleanItemEnhanced(targetItem, itemType);
+    let count = 0;
+    for (const field of new Set([...Object.keys(s), ...Object.keys(t)])) {
+      if (this.stableStringify(s[field]) !== this.stableStringify(t[field])) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  // JSON with sorted object keys, so the order in which an API returns fields never
+  // counts as a difference.
+  stableStringify(value) {
+    if (value === undefined) return "undefined";
+    if (Array.isArray(value)) {
+      return `[${value.map((v) => this.stableStringify(v)).join(",")}]`;
+    }
+    if (value && typeof value === "object") {
+      return `{${Object.keys(value)
+        .sort()
+        .filter((k) => value[k] !== undefined)
+        .map((k) => `${JSON.stringify(k)}:${this.stableStringify(value[k])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  // Nested objects carry site-specific links too (statusCategory.self, avatar URLs):
+  // drop "self" keys and URL strings at every depth. Nested ids are kept.
+  cleanNested(value) {
+    if (Array.isArray(value)) return value.map((v) => this.cleanNested(v));
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const k of Object.keys(value)) {
+        const v = value[k];
+        if (k === "self") continue;
+        if (typeof v === "string" && /https?:\/\//.test(v)) continue;
+        out[k] = this.cleanNested(v);
+      }
+      return out;
+    }
+    return value;
   }
 
   getComparisonKey(item, keyField, nameField) {
@@ -1569,6 +1693,10 @@ class JIRAConfigComparator {
           value.includes("customfield_")
         ) {
           value = "customfield_[ID]";
+        }
+
+        if (value && typeof value === "object") {
+          value = this.cleanNested(value);
         }
 
         cleaned[key] = value;
@@ -1776,9 +1904,9 @@ class JIRAConfigComparator {
     const sourceClean = this.cleanItemEnhanced(sourceItem, itemType);
     const targetClean = this.cleanItemEnhanced(targetItem, itemType);
 
-    // Check for differences
-    const sourceStr = JSON.stringify(sourceClean);
-    const targetStr = JSON.stringify(targetClean);
+    // Check for differences (key order of the API response is not a difference)
+    const sourceStr = this.stableStringify(sourceClean);
+    const targetStr = this.stableStringify(targetClean);
 
     if (sourceStr === targetStr) {
       return {
@@ -1800,7 +1928,9 @@ class JIRAConfigComparator {
       const sourceValue = sourceClean[field];
       const targetValue = targetClean[field];
 
-      if (JSON.stringify(sourceValue) !== JSON.stringify(targetValue)) {
+      if (
+        this.stableStringify(sourceValue) !== this.stableStringify(targetValue)
+      ) {
         // Check if this is a benign difference
         if (this.isBenignDifference(sourceValue, targetValue, field)) {
           reasons.push(`${field}: benign difference (migration artifact)`);
@@ -1853,6 +1983,15 @@ class JIRAConfigComparator {
       }
     });
 
+    if (reasons.length === 0) {
+      // Every differing field was skipped (e.g. --ignore-descriptions)
+      return {
+        hasDifferences: false,
+        severity: "none",
+        reason: "No meaningful differences",
+      };
+    }
+
     return {
       hasDifferences: true,
       severity: maxSeverity,
@@ -1893,7 +2032,11 @@ class JIRAConfigComparator {
     return cleaned;
   }
 
-  formatConfigSection(title, comparisonResult) {
+  formatConfigSection(
+    title,
+    comparisonResult,
+    itemType = this.getItemTypeFromTitle(title),
+  ) {
     const output = [
       `\n${"=".repeat(60)}`,
       title,
@@ -1909,15 +2052,12 @@ class JIRAConfigComparator {
     const missingLow = [];
 
     comparisonResult.missingInTarget.forEach((item) => {
-      const importance = this.categorizeItemImportance(
-        item,
-        this.getItemTypeFromTitle(title),
-      );
+      const importance = this.categorizeItemImportance(item, itemType);
       const name = item.name || item.id || "Unknown";
       const itemWithImportance = { name, id: item.id || "N/A", importance };
 
       // Debug output for project categorization
-      if (this.getItemTypeFromTitle(title) === "project") {
+      if (itemType === "project") {
         console.log(
           `🔍 DEBUG: Project "${name}" categorized as ${importance} priority`,
         );
@@ -2030,7 +2170,7 @@ class JIRAConfigComparator {
   formatDifferences(differences, output) {
     differences.forEach((diff) => {
       output.push(
-        `\n   📋 ${diff.name} (ID: ${diff.key}) [${diff.severity.toUpperCase()}]`,
+        `\n   📋 ${diff.name} (ID: ${this.formatDiffIds(diff)}) [${diff.severity.toUpperCase()}]`,
       );
       if (diff.reason && !this.options.summary) {
         output.push(`      Reason: ${diff.reason}`);
@@ -2073,6 +2213,16 @@ class JIRAConfigComparator {
         });
       }
     });
+  }
+
+  // Several items can share a name, so show which source and target item were paired.
+  formatDiffIds(diff) {
+    const plain = (v) => typeof v === "string" || typeof v === "number";
+    if (!plain(diff.sourceId)) return diff.key;
+    if (!plain(diff.targetId) || String(diff.targetId) === String(diff.sourceId)) {
+      return String(diff.sourceId);
+    }
+    return `${diff.sourceId} -> ${diff.targetId}`;
   }
 
   // Helper to determine item type from section title
@@ -2205,18 +2355,27 @@ class JIRAConfigComparator {
       output.push(
         "⚠️  No sprint boards found on either instance (JIRA Software may not be installed)",
       );
-    } else if (sourceBoards.length !== targetBoards.length) {
-      output.push(`⚠️  Different number of sprint boards`);
+    } else {
+      // Match boards by name AND type, counting duplicates: board names are not
+      // unique ("ABC board" for a scrum and a kanban board), so a plain name lookup
+      // hid a missing board whenever another board shared its name.
+      const label = (b) => `${b.boardName} (${b.boardType})`;
+      const remaining = new Map();
+      targetBoards.forEach((b) => {
+        const k = label(b).toLowerCase();
+        remaining.set(k, [...(remaining.get(k) || []), b]);
+      });
+      const missingBoards = [];
+      sourceBoards.forEach((b) => {
+        const list = remaining.get(label(b).toLowerCase());
+        if (list && list.length > 0) list.shift();
+        else missingBoards.push(label(b));
+      });
+      const extraBoards = [...remaining.values()].flat().map(label);
 
-      const sourceBoardNames = sourceBoards.map((b) => b.boardName);
-      const targetBoardNames = targetBoards.map((b) => b.boardName);
-
-      const missingBoards = sourceBoardNames.filter(
-        (name) => !targetBoardNames.includes(name),
-      );
-      const extraBoards = targetBoardNames.filter(
-        (name) => !sourceBoardNames.includes(name),
-      );
+      if (sourceBoards.length !== targetBoards.length) {
+        output.push(`⚠️  Different number of sprint boards`);
+      }
 
       if (missingBoards.length > 0) {
         output.push(`\n❌ BOARDS MISSING IN TARGET:`);
@@ -2227,24 +2386,33 @@ class JIRAConfigComparator {
         output.push(`\n➕ EXTRA BOARDS IN TARGET:`);
         extraBoards.forEach((name) => output.push(`   - ${name}`));
       }
-    } else {
-      output.push("✅ Same number of sprint boards found");
 
-      // Compare board types
-      const sourceBoardTypes = new Set(sourceBoards.map((b) => b.boardType));
-      const targetBoardTypes = new Set(targetBoards.map((b) => b.boardType));
-
-      if (
-        JSON.stringify([...sourceBoardTypes].sort()) !==
-        JSON.stringify([...targetBoardTypes].sort())
-      ) {
-        output.push("\n⚠️  Different board types found:");
-        output.push(`    Source types: ${[...sourceBoardTypes].join(", ")}`);
-        output.push(`    Target types: ${[...targetBoardTypes].join(", ")}`);
+      if (missingBoards.length === 0 && extraBoards.length === 0) {
+        output.push("✅ Same sprint boards (name and type) found");
       }
     }
 
     return output.join("\n");
+  }
+
+  // Key time tracking fields that differ, as "section.field" paths.
+  getTimeTrackingDifferences() {
+    const src = this.sourceConfig.timeTrackingConfig;
+    const tgt = this.targetConfig.timeTrackingConfig;
+    if (!src || !tgt) return src || tgt ? ["timeTrackingConfig"] : [];
+    const checks = {
+      configuration: ["workingDaysPerWeek", "workingHoursPerDay", "timeTrackingEnabled"],
+      options: ["defaultUnit", "timeFormat"],
+      list: ["fieldConfigurationId", "fieldId"],
+    };
+    const diffs = [];
+    for (const [part, fields] of Object.entries(checks)) {
+      if (!src[part] || !tgt[part]) continue;
+      fields.forEach((f) => {
+        if (src[part][f] !== tgt[part][f]) diffs.push(`${part}.${f}`);
+      });
+    }
+    return diffs;
   }
 
   formatTimeTrackingSection() {
@@ -2552,69 +2720,37 @@ class JIRAConfigComparator {
       }
     }
 
-    // Check issue types
-    if (this.sourceConfig.issueTypes && this.targetConfig.issueTypes) {
-      const comparison = this.compareLists(
-        this.sourceConfig.issueTypes,
-        this.targetConfig.issueTypes,
-        "name",
-        "name",
-        "issueType",
-      );
+    const comparisons = this.getListSectionComparisons();
 
-      // Only show critical items if business-critical-only is enabled
-      let criticalMissing = comparison.missingInTarget.filter(
+    // Critical items missing in target (issue types, custom fields, workflows)
+    const missingLabels = {
+      issueTypes: "issue types",
+      customFields: "custom fields",
+      workflows: "workflows",
+    };
+    for (const { section, comparison } of comparisons) {
+      const label = missingLabels[section.configKey];
+      if (!label) continue;
+      const criticalMissing = comparison.missingInTarget.filter(
         (item) =>
-          this.categorizeItemImportance(item, "issueType") === "critical",
+          this.categorizeItemImportance(item, section.itemType) === "critical",
       );
-
       if (criticalMissing.length > 0) {
         criticalIssues.push(
-          `🚨 ${criticalMissing.length} CRITICAL issue types missing: ${criticalMissing.map((i) => i.name).join(", ")}`,
+          `🚨 ${criticalMissing.length} CRITICAL ${label} missing: ${criticalMissing.map((i) => i.name).join(", ")}`,
         );
       }
     }
 
-    // Check custom fields
-    if (this.sourceConfig.customFields && this.targetConfig.customFields) {
-      const comparison = this.compareLists(
-        this.sourceConfig.customFields,
-        this.targetConfig.customFields,
-        "name",
-        "name",
-        "customField",
+    // Critical differences in any section: the summary must agree with the
+    // "CRITICAL DIFFERENCES" blocks printed further down the report.
+    for (const { section, comparison } of comparisons) {
+      const criticalDiffs = comparison.differences.filter(
+        (d) => d.severity === "critical",
       );
-
-      let criticalMissing = comparison.missingInTarget.filter(
-        (item) =>
-          this.categorizeItemImportance(item, "customField") === "critical",
-      );
-
-      if (criticalMissing.length > 0) {
+      if (criticalDiffs.length > 0) {
         criticalIssues.push(
-          `🚨 ${criticalMissing.length} CRITICAL custom fields missing: ${criticalMissing.map((i) => i.name).join(", ")}`,
-        );
-      }
-    }
-
-    // Check workflows
-    if (this.sourceConfig.workflows && this.targetConfig.workflows) {
-      const comparison = this.compareLists(
-        this.sourceConfig.workflows,
-        this.targetConfig.workflows,
-        "name",
-        "name",
-        "workflow",
-      );
-
-      let criticalMissing = comparison.missingInTarget.filter(
-        (item) =>
-          this.categorizeItemImportance(item, "workflow") === "critical",
-      );
-
-      if (criticalMissing.length > 0) {
-        criticalIssues.push(
-          `🚨 ${criticalMissing.length} CRITICAL workflows missing: ${criticalMissing.map((i) => i.name).join(", ")}`,
+          `🚨 ${criticalDiffs.length} CRITICAL difference${criticalDiffs.length === 1 ? "" : "s"} in ${section.summaryName}: ${criticalDiffs.map((d) => d.name).join(", ")}`,
         );
       }
     }
@@ -2664,89 +2800,32 @@ class JIRAConfigComparator {
       report.push("=".repeat(80));
     }
 
-    // Issue Types Comparison
-    if (this.sourceConfig.issueTypes && this.targetConfig.issueTypes) {
-      const comparison = this.compareLists(
-        this.sourceConfig.issueTypes,
-        this.targetConfig.issueTypes,
-        "name",
-        "name",
-        "issueType",
-      );
-      report.push(this.formatConfigSection("ISSUE TYPES", comparison));
-    }
-
-    // Issue Type Schemes Comparison
-    if (
-      this.sourceConfig.issueTypeSchemes &&
-      this.targetConfig.issueTypeSchemes
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.issueTypeSchemes,
-        this.targetConfig.issueTypeSchemes,
-        "name",
-        "name",
-        "scheme",
-      );
-      report.push(this.formatConfigSection("ISSUE TYPE SCHEMES", comparison));
-    }
-
-    // Issue Link Types Comparison
-    if (this.sourceConfig.issueLinkTypes && this.targetConfig.issueLinkTypes) {
-      const comparison = this.compareLists(
-        this.sourceConfig.issueLinkTypes,
-        this.targetConfig.issueLinkTypes,
-        "name",
-        "name",
-        "linkType",
-      );
-      report.push(this.formatConfigSection("ISSUE LINK TYPES", comparison));
-
-      // Debug: Show why no differences are reported
-      report.push(`\n🔍 DEBUG: Issue Link Types Analysis:`);
+    const comparisons = this.getListSectionComparisons();
+    const pushSection = ({ section, comparison }) => {
       report.push(
-        `   Source items: ${this.sourceConfig.issueLinkTypes.length}`,
+        this.formatConfigSection(section.title, comparison, section.itemType),
       );
-      report.push(
-        `   Target items: ${this.targetConfig.issueLinkTypes.length}`,
-      );
-      report.push(`   Missing in target: ${comparison.missingInTarget.length}`);
-      report.push(`   Extra in target: ${comparison.extraInTarget.length}`);
-      report.push(`   Differences: ${comparison.differences.length}`);
+      if (section.configKey === "issueLinkTypes") {
+        // Debug: Show why no differences are reported
+        report.push(`\n🔍 DEBUG: Issue Link Types Analysis:`);
+        report.push(`   Source items: ${comparison.sourceCount}`);
+        report.push(`   Target items: ${comparison.targetCount}`);
+        report.push(`   Missing in target: ${comparison.missingInTarget.length}`);
+        report.push(`   Extra in target: ${comparison.extraInTarget.length}`);
+        report.push(`   Differences: ${comparison.differences.length}`);
 
-      if (comparison.missingInTarget.length > 0) {
-        report.push(
-          `   Missing items: ${comparison.missingInTarget.map((item) => item.name).join(", ")}`,
-        );
+        if (comparison.missingInTarget.length > 0) {
+          report.push(
+            `   Missing items: ${comparison.missingInTarget.map((item) => item.name).join(", ")}`,
+          );
+        }
       }
-    }
+    };
 
-    // Priority Schemes Comparison
-    if (
-      this.sourceConfig.prioritySchemes &&
-      this.targetConfig.prioritySchemes
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.prioritySchemes,
-        this.targetConfig.prioritySchemes,
-        "name",
-        "name",
-        "priorityScheme",
-      );
-      report.push(this.formatConfigSection("PRIORITY SCHEMES", comparison));
-    }
-
-    // Priorities Comparison
-    if (this.sourceConfig.priorities && this.targetConfig.priorities) {
-      const comparison = this.compareLists(
-        this.sourceConfig.priorities,
-        this.targetConfig.priorities,
-        "name",
-        "name",
-        "priority",
-      );
-      report.push(this.formatConfigSection("PRIORITIES", comparison));
-    }
+    // Core list sections (issue types, schemes, link types, priorities)
+    comparisons
+      .filter(({ section }) => section.group === "core")
+      .forEach(pushSection);
 
     // Issue Hierarchy Comparison
     if (this.sourceConfig.issueHierarchy || this.targetConfig.issueHierarchy) {
@@ -2779,339 +2858,69 @@ class JIRAConfigComparator {
     report.push("COMPREHENSIVE CONFIGURATION VALIDATION");
     report.push("=".repeat(80));
 
-    // Workflows Comparison
-    if (this.sourceConfig.workflows && this.targetConfig.workflows) {
-      const comparison = this.compareLists(
-        this.sourceConfig.workflows,
-        this.targetConfig.workflows,
-        "name",
-        "name",
-        "workflow",
-      );
-      report.push(this.formatConfigSection("WORKFLOWS", comparison));
-    }
-
-    // Workflow Schemes Comparison
-    if (
-      this.sourceConfig.workflowSchemes &&
-      this.targetConfig.workflowSchemes
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.workflowSchemes,
-        this.targetConfig.workflowSchemes,
-        "name",
-        "name",
-        "workflowScheme",
-      );
-      report.push(this.formatConfigSection("WORKFLOW SCHEMES", comparison));
-    }
-
-    // Custom Fields Comparison
-    if (this.sourceConfig.customFields && this.targetConfig.customFields) {
-      const comparison = this.compareLists(
-        this.sourceConfig.customFields,
-        this.targetConfig.customFields,
-        "name",
-        "name",
-        "customField",
-      );
-      report.push(this.formatConfigSection("CUSTOM FIELDS", comparison));
-    }
-
-    // Field Configurations Comparison
-    if (
-      this.sourceConfig.fieldConfigurations &&
-      this.targetConfig.fieldConfigurations
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.fieldConfigurations,
-        this.targetConfig.fieldConfigurations,
-        "name",
-        "name",
-        "fieldConfiguration",
-      );
-      report.push(this.formatConfigSection("FIELD CONFIGURATIONS", comparison));
-    }
-
-    // Screen Schemes Comparison
-    if (this.sourceConfig.screenSchemes && this.targetConfig.screenSchemes) {
-      const comparison = this.compareLists(
-        this.sourceConfig.screenSchemes,
-        this.targetConfig.screenSchemes,
-        "name",
-        "name",
-        "screenScheme",
-      );
-      report.push(this.formatConfigSection("SCREEN SCHEMES", comparison));
-    }
-
-    // Permission Schemes Comparison
-    if (
-      this.sourceConfig.permissionSchemes &&
-      this.targetConfig.permissionSchemes
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.permissionSchemes,
-        this.targetConfig.permissionSchemes,
-        "name",
-        "name",
-        "permissionScheme",
-      );
-      report.push(this.formatConfigSection("PERMISSION SCHEMES", comparison));
-    }
-
-    // Notification Schemes Comparison
-    if (
-      this.sourceConfig.notificationSchemes &&
-      this.targetConfig.notificationSchemes
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.notificationSchemes,
-        this.targetConfig.notificationSchemes,
-        "name",
-        "name",
-        "notificationScheme",
-      );
-      report.push(this.formatConfigSection("NOTIFICATION SCHEMES", comparison));
-    }
-
-    // Issue Security Schemes Comparison
-    if (
-      this.sourceConfig.issueSecuritySchemes &&
-      this.targetConfig.issueSecuritySchemes
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.issueSecuritySchemes,
-        this.targetConfig.issueSecuritySchemes,
-        "name",
-        "name",
-        "securityScheme",
-      );
-      report.push(
-        this.formatConfigSection("ISSUE SECURITY SCHEMES", comparison),
-      );
-    }
-
-    // Project Categories Comparison
-    if (
-      this.sourceConfig.projectCategories &&
-      this.targetConfig.projectCategories
-    ) {
-      const comparison = this.compareLists(
-        this.sourceConfig.projectCategories,
-        this.targetConfig.projectCategories,
-        "name",
-        "name",
-        "category",
-      );
-      report.push(this.formatConfigSection("PROJECT CATEGORIES", comparison));
-    }
-
-    // Resolutions Comparison
-    if (this.sourceConfig.resolutions && this.targetConfig.resolutions) {
-      const comparison = this.compareLists(
-        this.sourceConfig.resolutions,
-        this.targetConfig.resolutions,
-        "name",
-        "name",
-        "resolution",
-      );
-      report.push(this.formatConfigSection("RESOLUTIONS", comparison));
-    }
-
-    // Statuses Comparison
-    if (this.sourceConfig.statuses && this.targetConfig.statuses) {
-      const comparison = this.compareLists(
-        this.sourceConfig.statuses,
-        this.targetConfig.statuses,
-        "name",
-        "name",
-        "status",
-      );
-      report.push(this.formatConfigSection("STATUSES", comparison));
-    }
+    comparisons
+      .filter(({ section }) => section.group === "comprehensive")
+      .forEach(pushSection);
 
     // Summary
     report.push("\n" + "=".repeat(80));
     report.push("SUMMARY");
     report.push("=".repeat(80));
 
-    const sections = [
-      {
-        name: "Issue Types",
-        source: this.sourceConfig.issueTypes,
-        target: this.targetConfig.issueTypes,
-      },
-      {
-        name: "Issue Type Schemes",
-        source: this.sourceConfig.issueTypeSchemes,
-        target: this.targetConfig.issueTypeSchemes,
-      },
-      {
-        name: "Issue Link Types",
-        source: this.sourceConfig.issueLinkTypes,
-        target: this.targetConfig.issueLinkTypes,
-      },
-      {
-        name: "Priority Schemes",
-        source: this.sourceConfig.prioritySchemes,
-        target: this.targetConfig.prioritySchemes,
-      },
-      {
-        name: "Priorities",
-        source: this.sourceConfig.priorities,
-        target: this.targetConfig.priorities,
-      },
-      {
-        name: "Time Tracking Configuration",
-        source: this.sourceConfig.timeTrackingConfig,
-        target: this.targetConfig.timeTrackingConfig,
-      },
-      // Comprehensive configuration areas
-      {
-        name: "Workflows",
-        source: this.sourceConfig.workflows,
-        target: this.targetConfig.workflows,
-      },
-      {
-        name: "Workflow Schemes",
-        source: this.sourceConfig.workflowSchemes,
-        target: this.targetConfig.workflowSchemes,
-      },
-      {
-        name: "Custom Fields",
-        source: this.sourceConfig.customFields,
-        target: this.targetConfig.customFields,
-      },
-      {
-        name: "Field Configurations",
-        source: this.sourceConfig.fieldConfigurations,
-        target: this.targetConfig.fieldConfigurations,
-      },
-      {
-        name: "Screen Schemes",
-        source: this.sourceConfig.screenSchemes,
-        target: this.targetConfig.screenSchemes,
-      },
-      {
-        name: "Permission Schemes",
-        source: this.sourceConfig.permissionSchemes,
-        target: this.targetConfig.permissionSchemes,
-      },
-      {
-        name: "Notification Schemes",
-        source: this.sourceConfig.notificationSchemes,
-        target: this.targetConfig.notificationSchemes,
-      },
-      {
-        name: "Issue Security Schemes",
-        source: this.sourceConfig.issueSecuritySchemes,
-        target: this.targetConfig.issueSecuritySchemes,
-      },
-      {
-        name: "Project Categories",
-        source: this.sourceConfig.projectCategories,
-        target: this.targetConfig.projectCategories,
-      },
-      {
-        name: "Resolutions",
-        source: this.sourceConfig.resolutions,
-        target: this.targetConfig.resolutions,
-      },
-      {
-        name: "Statuses",
-        source: this.sourceConfig.statuses,
-        target: this.targetConfig.statuses,
-      },
-    ];
-
     let totalSections = 0;
     let identicalSections = 0;
     let differentSections = 0;
 
-    sections.forEach((section) => {
-      if (section.source && section.target) {
-        totalSections++;
-
-        // Get the item type for this section
-        const itemType = this.getItemTypeFromTitle(section.name);
-
-        const comparison = this.compareLists(
-          section.source,
-          section.target,
-          "name",
-          "name",
-          itemType,
-        );
-
-        // Apply filtering logic like in critical summary
-        let hasRelevantDifferences = false;
-
-        // Check missing items in target
-        if (comparison.missingInTarget.length > 0) {
-          const relevantMissing = comparison.missingInTarget.filter((item) => {
-            const importance = this.categorizeItemImportance(item, itemType);
-
-            // Apply business-critical filter
-            if (
-              this.options.businessCriticalOnly &&
-              importance !== "critical"
-            ) {
-              return false;
-            }
-
-            return true;
-          });
-
-          if (relevantMissing.length > 0) {
-            hasRelevantDifferences = true;
-          }
+    const thresholdOrder = { low: 1, medium: 2, high: 3, critical: 4 };
+    const summaryRows = comparisons.map(({ section, comparison }) => {
+      const itemType = section.itemType;
+      const relevantMissing = comparison.missingInTarget.filter(
+        (item) =>
+          !this.options.businessCriticalOnly ||
+          this.categorizeItemImportance(item, itemType) === "critical",
+      );
+      const relevantDifferences = comparison.differences.filter((diff) => {
+        if (this.options.businessCriticalOnly && diff.importance !== "critical") {
+          return false;
         }
-
-        // Check differences with severity filtering
-        if (comparison.differences.length > 0) {
-          const relevantDifferences = comparison.differences.filter((diff) => {
-            // Apply business-critical filter
-            if (
-              this.options.businessCriticalOnly &&
-              diff.importance !== "critical"
-            ) {
-              return false;
-            }
-
-            // Apply severity threshold filter
-            if (this.options.severityThreshold) {
-              const thresholdOrder = {
-                low: 1,
-                medium: 2,
-                high: 3,
-                critical: 4,
-              };
-              const diffOrder = thresholdOrder[diff.severity] || 0;
-              const thresholdOrderVal =
-                thresholdOrder[this.options.severityThreshold] || 0;
-
-              if (diffOrder < thresholdOrderVal) {
-                return false;
-              }
-            }
-
-            return true;
-          });
-
-          if (relevantDifferences.length > 0) {
-            hasRelevantDifferences = true;
-          }
+        if (this.options.severityThreshold) {
+          const diffOrder = thresholdOrder[diff.severity] || 0;
+          const thresholdOrderVal =
+            thresholdOrder[this.options.severityThreshold] || 0;
+          if (diffOrder < thresholdOrderVal) return false;
         }
-
-        if (!hasRelevantDifferences && comparison.extraInTarget.length === 0) {
-          identicalSections++;
-        } else if (hasRelevantDifferences) {
-          differentSections++;
-          report.push(`⚠️  ${section.name}: Differences found`);
-        }
-      }
+        return true;
+      });
+      return {
+        name: section.summaryName,
+        order: section.summaryOrder,
+        hasRelevantDifferences:
+          relevantMissing.length > 0 || relevantDifferences.length > 0,
+        hasExtra: comparison.extraInTarget.length > 0,
+      };
     });
+
+    // Time tracking is one settings object, not a list: compare its key fields.
+    if (this.sourceConfig.timeTrackingConfig && this.targetConfig.timeTrackingConfig) {
+      summaryRows.push({
+        name: "Time Tracking Configuration",
+        order: TIME_TRACKING_SUMMARY_ORDER,
+        hasRelevantDifferences: this.getTimeTrackingDifferences().length > 0,
+        hasExtra: false,
+      });
+    }
+
+    summaryRows
+      .sort((x, y) => x.order - y.order)
+      .forEach((row) => {
+        totalSections++;
+        if (!row.hasRelevantDifferences && !row.hasExtra) {
+          identicalSections++;
+        } else if (row.hasRelevantDifferences) {
+          differentSections++;
+          report.push(`⚠️  ${row.name}: Differences found`);
+        }
+      });
 
     if (totalSections > 0) {
       report.push(`\nConfigurations compared: ${totalSections}`);
@@ -3124,6 +2933,24 @@ class JIRAConfigComparator {
     report.push("=".repeat(80));
 
     return report.join("\n");
+  }
+
+  // Every list-shaped configuration area, compared once per report.
+  getListSectionComparisons() {
+    return LIST_SECTIONS.filter(
+      (section) =>
+        this.sourceConfig[section.configKey] &&
+        this.targetConfig[section.configKey],
+    ).map((section) => ({
+      section,
+      comparison: this.compareLists(
+        this.sourceConfig[section.configKey],
+        this.targetConfig[section.configKey],
+        "name",
+        "name",
+        section.itemType,
+      ),
+    }));
   }
 
   async run() {
@@ -3165,93 +2992,97 @@ class JIRAConfigComparator {
   }
 }
 
-// Command line interface
-program
-  .name("jira-config-comparator")
-  .description(
-    "Compare JIRA configurations between source and target instances",
-  )
-  .requiredOption("--source <url>", "Source JIRA instance URL")
-  .requiredOption("--target <url>", "Target JIRA instance URL")
-  .requiredOption("--email <email>", "Email address for authentication")
-  .requiredOption("--token <token>", "API token for authentication")
-  .option(
-    "--output <dir>",
-    "Output directory for report (default: current directory)",
-    ".",
-  )
-  .option(
-    "--severity <level>",
-    "Minimum severity level to report (critical|high|medium|low)",
-    "low",
-  )
-  .option(
-    "--ignore-descriptions",
-    "Ignore differences in description fields",
-    false,
-  )
-  .option(
-    "--business-critical-only",
-    "Only show business-critical differences",
-    false,
-  )
-  .option("--summary", "Show brief summary instead of full details", false)
-  .addHelpText(
-    "after",
-    `
-Examples:
-  $ node jira-config-comparator.js \\
-    --source https://source.atlassian.net \\
-    --target https://target.atlassian.net \\
-    --email user@company.com \\
-    --token your-api-token
+module.exports = { JIRAConfigComparator };
 
-  $ node jira-config-comparator.js \\
-    --source https://source.atlassian.net \\
-    --target https://target.atlassian.net \\
-    --email user@company.com \\
-    --token your-api-token \\
-    --output ./reports
+// Command line interface (only when run directly, so tests can require the class)
+if (require.main === module) {
+  program
+    .name("jira-config-comparator")
+    .description(
+      "Compare JIRA configurations between source and target instances",
+    )
+    .requiredOption("--source <url>", "Source JIRA instance URL")
+    .requiredOption("--target <url>", "Target JIRA instance URL")
+    .requiredOption("--email <email>", "Email address for authentication")
+    .requiredOption("--token <token>", "API token for authentication")
+    .option(
+      "--output <dir>",
+      "Output directory for report (default: current directory)",
+      ".",
+    )
+    .option(
+      "--severity <level>",
+      "Minimum severity level to report (critical|high|medium|low)",
+      "low",
+    )
+    .option(
+      "--ignore-descriptions",
+      "Ignore differences in description fields",
+      false,
+    )
+    .option(
+      "--business-critical-only",
+      "Only show business-critical differences",
+      false,
+    )
+    .option("--summary", "Show brief summary instead of full details", false)
+    .addHelpText(
+      "after",
+      `
+  Examples:
+    $ node jira-config-comparator.js \\
+      --source https://source.atlassian.net \\
+      --target https://target.atlassian.net \\
+      --email user@company.com \\
+      --token your-api-token
 
-  $ node jira-config-comparator.js \\
-    --source https://source.atlassian.net \\
-    --target https://target.atlassian.net \\
-    --email user@company.com \\
-    --token your-api-token \\
-    --severity critical \\
-    --business-critical-only
+    $ node jira-config-comparator.js \\
+      --source https://source.atlassian.net \\
+      --target https://target.atlassian.net \\
+      --email user@company.com \\
+      --token your-api-token \\
+      --output ./reports
 
-  $ node jira-config-comparator.js \\
-    --source https://source.atlassian.net \\
-    --target https://target.atlassian.net \\
-    --email user@company.com \\
-    --token your-api-token \\
-    --ignore-descriptions \\
-    --summary
+    $ node jira-config-comparator.js \\
+      --source https://source.atlassian.net \\
+      --target https://target.atlassian.net \\
+      --email user@company.com \\
+      --token your-api-token \\
+      --severity critical \\
+      --business-critical-only
 
-Note: Generate API token from: https://id.atlassian.com/manage-profile/security/api-tokens
-    `,
+    $ node jira-config-comparator.js \\
+      --source https://source.atlassian.net \\
+      --target https://target.atlassian.net \\
+      --email user@company.com \\
+      --token your-api-token \\
+      --ignore-descriptions \\
+      --summary
+
+  Note: Generate API token from: https://id.atlassian.com/manage-profile/security/api-tokens
+      `,
+    );
+
+  program.parse();
+
+  const options = program.opts();
+
+  const comparator = new JIRAConfigComparator(
+    options.source,
+    options.target,
+    options.email,
+    options.token,
+    {
+      outputDir: options.output,
+      severity: options.severity,
+      ignoreDescriptions: options.ignoreDescriptions,
+      businessCriticalOnly: options.businessCriticalOnly,
+      summary: options.summary,
+    },
   );
 
-program.parse();
-
-const options = program.opts();
-
-const comparator = new JIRAConfigComparator(
-  options.source,
-  options.target,
-  options.email,
-  options.token,
-  {
-    outputDir: options.output,
-    severity: options.severity,
-    ignoreDescriptions: options.ignoreDescriptions,
-    businessCriticalOnly: options.businessCriticalOnly,
-    summary: options.summary,
-  },
-);
-
-comparator.run().catch((error) => {
-  console.error("Fatal error:", error.message);
-  process.exit(1);
-});
+  comparator.run().catch((error) => {
+    console.error("Fatal error:", error.message);
+    process.exit(1);
+  });
+}

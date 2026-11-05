@@ -91,6 +91,81 @@ const stripMig = (s) => norm(s).replace(/\s*\(migrated\)\s*$/, "");
 const fType = (f) =>
   (f.schema && (f.schema.custom || f.schema.type)) || (f.custom ? "custom" : "system");
 
+// Pair every DC custom field with ONE Cloud custom field by name. Field names are
+// not unique (two "Team" fields, one per app), so within a same-name group a Cloud
+// field is claimed by one DC field only, preferring the same field type; earlier
+// versions mapped every same-named DC field to the first Cloud field of that name,
+// which hid a DC field that had no Cloud counterpart of its own.
+function matchFields(dc, cloud) {
+  const byName = new Map();
+  for (const f of cloud) {
+    const k = norm(f.name);
+    if (!byName.has(k)) byName.set(k, []);
+    byName.get(k).push(f);
+  }
+  const claimed = new Set();
+
+  const migratedCandidates = (d) => {
+    const t = stripMig(d.name);
+    let out = [];
+    for (const [k, arr] of byName) if (stripMig(k) === t) out = out.concat(arr);
+    return out;
+  };
+  const sameType = (d) => (c) => fType(c) === fType(d);
+
+  // Passes, strongest evidence first, so a weaker match never takes a Cloud field
+  // a stronger one needs: exact name + same type, exact name, "(migrated)" name +
+  // same type, "(migrated)" name.
+  const passes = [
+    { how: "exact name", group: (d) => byName.get(norm(d.name)) || [], typed: true },
+    { how: "exact name", group: (d) => byName.get(norm(d.name)) || [], typed: false },
+    { how: "name (ignoring (migrated))", group: migratedCandidates, typed: true },
+    { how: "name (ignoring (migrated))", group: migratedCandidates, typed: false },
+  ];
+  const result = new Map(); // DC field -> row
+  for (const pass of passes) {
+    for (const d of dc) {
+      if (result.has(d)) continue;
+      const group = pass.group(d);
+      const m = group.find(
+        (c) => !claimed.has(c) && (!pass.typed || sameType(d)(c)),
+      );
+      if (m) {
+        claimed.add(m);
+        result.set(d, row(d, m, pass.how, group));
+      }
+    }
+  }
+
+  const mapped = [];
+  const unmapped = [];
+  for (const d of dc) {
+    if (result.has(d)) {
+      mapped.push(result.get(d));
+      continue;
+    }
+    const named = (byName.get(norm(d.name)) || []).concat(migratedCandidates(d));
+    unmapped.push({
+      dcName: d.name, dcId: d.id, dcType: fType(d),
+      reason: named.length
+        ? `Every Cloud field named "${named[0].name}" is already matched to another DC field with that name`
+        : "No Cloud custom field with a matching name",
+    });
+  }
+  return { mapped, unmapped };
+}
+
+function row(d, m, how, group) {
+  const notes = [];
+  if (group.length > 1) notes.push(`${group.length} cloud fields share this name`);
+  if (fType(m) !== fType(d)) notes.push("field type differs");
+  return {
+    dcName: d.name, dcId: d.id, dcType: fType(d),
+    cloudName: m.name, cloudId: m.id, cloudType: fType(m),
+    how, note: notes.join("; "),
+  };
+}
+
 function csv(rows, cols) {
   const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
   return [cols.map((c) => esc(c.header)).join(",")]
@@ -115,7 +190,9 @@ function resolveExcelJS() {
   return null;
 }
 
-(async () => {
+module.exports = { matchFields };
+
+if (require.main === module) (async () => {
   for (const k of ["DC_BASE_URL", "DC_USERNAME", "DC_PASSWORD", "CLOUD_BASE_URL", "CLOUD_API_TOKEN"])
     if (!E[k]) throw new Error(`Missing env ${k}`);
 
@@ -126,35 +203,7 @@ function resolveExcelJS() {
   const cloud = await cloudCustomFields();
   console.log(`  ${cloud.length} Cloud custom fields`);
 
-  const byName = new Map();
-  for (const f of cloud) {
-    const k = norm(f.name);
-    if (!byName.has(k)) byName.set(k, []);
-    byName.get(k).push(f);
-  }
-
-  const mapped = [];
-  const unmapped = [];
-  for (const d of dc) {
-    let m = byName.get(norm(d.name));
-    let how = "exact name";
-    if (!m) {
-      const t = stripMig(d.name);
-      for (const [k, arr] of byName)
-        if (stripMig(k) === t) {
-          m = arr;
-          how = "name (ignoring (migrated))";
-          break;
-        }
-    }
-    if (m && m.length)
-      mapped.push({
-        dcName: d.name, dcId: d.id, dcType: fType(d),
-        cloudName: m[0].name, cloudId: m[0].id, cloudType: fType(m[0]),
-        how, note: m.length > 1 ? `${m.length} cloud fields share this name` : "",
-      });
-    else unmapped.push({ dcName: d.name, dcId: d.id, dcType: fType(d), reason: "No Cloud custom field with a matching name" });
-  }
+  const { mapped, unmapped } = matchFields(dc, cloud);
   mapped.sort((a, b) => a.dcName.localeCompare(b.dcName));
   unmapped.sort((a, b) => a.dcName.localeCompare(b.dcName));
 

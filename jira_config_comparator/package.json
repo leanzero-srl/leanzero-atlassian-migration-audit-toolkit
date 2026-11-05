@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node jira-config-comparator.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "jira",
@@ -28,7 +28,7 @@
     "commander": "^11.0.0"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   },
   "repository": {
     "type": "git",

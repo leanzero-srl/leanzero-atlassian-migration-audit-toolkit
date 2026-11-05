@@ -4,7 +4,8 @@
   "description": "Audit which Data Center custom fields exist on Jira Cloud, and why the rest do not.",
   "main": "field_report.js",
   "scripts": {
-    "start": "node field_report.js"
+    "start": "node field_report.js",
+    "test": "node --test test/*.test.js"
   },
   "license": "Apache-2.0",
   "dependencies": {
