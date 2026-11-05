@@ -330,3 +330,67 @@ test("sprint boards: same count but a renamed board is reported", () => {
   assert.match(report, /BOARDS MISSING IN TARGET/);
   assert.match(report, /EXTRA BOARDS IN TARGET/);
 });
+
+// ---- added after independent review ----
+
+test("scope: a missing site-wide item is not hidden by pairing it with a team-managed one", () => {
+  const c = makeComparator();
+  const types = issueTypesSnapshot().filter((t) => t.name === "Bug"); // 1 global + 2 scoped
+  const tgt = clone(types).filter((t) => t.scope);
+  tgt.push({ ...clone(types[1]), id: "10699", scope: { type: "PROJECT", project: { id: "11899" } }, description: "Third team" });
+  const r = c.compareLists(types, tgt, "name", "name", "issueType");
+  assert.deepEqual(r.missingInTarget.map((i) => i.id), ["1"]);
+  assert.deepEqual(r.extraInTarget.map((i) => i.id), ["10699"]);
+  assert.equal(r.differences.length, 0);
+});
+
+test("nested key order of the API response does not create differences", () => {
+  const c = makeComparator();
+  const src = [{ id: "1", name: "Open", statusCategory: { id: 2, key: "new", colorName: "blue-gray" } }];
+  const tgt = [{ id: "1", name: "Open", statusCategory: { colorName: "blue-gray", key: "new", id: 2 } }];
+  assert.ok(isClean(c.compareLists(src, tgt, "name", "name", "status")));
+  assert.equal(c.stableStringify({ b: 1, a: { d: 1, c: 2 } }), c.stableStringify({ a: { c: 2, d: 1 }, b: 1 }));
+});
+
+test("--ignore-descriptions: a description-only change is not a difference, other fields still are", () => {
+  const c = makeComparator({ ignoreDescriptions: true });
+  const src = [{ id: "1", name: "Highest", description: "Top", statusColor: "#d04437" }];
+  const descOnly = [{ id: "1", name: "Highest", description: "Changed", statusColor: "#d04437" }];
+  assert.ok(isClean(c.compareLists(src, descOnly, "name", "name", "priority")));
+  const colour = [{ id: "1", name: "Highest", description: "Changed", statusColor: "#ff0000" }];
+  const r = c.compareLists(src, colour, "name", "name", "priority");
+  assert.equal(r.differences.length, 1);
+  assert.doesNotMatch(r.differences[0].reason, /description/);
+});
+
+// Real Cloud shapes (checked on a live site 2026-11-06)
+const timeTracking = () => ({
+  configuration: { key: "JIRA", name: "JIRA provided time tracking" },
+  options: { workingHoursPerDay: 8.0, workingDaysPerWeek: 5.0, timeFormat: "pretty", defaultUnit: "hour" },
+  list: [{ key: "JIRA", name: "JIRA provided time tracking" }],
+});
+
+test("time tracking: identical settings are identical; a real change is reported in section and summary", () => {
+  const snap = fullSnapshot();
+  snap.timeTrackingConfig = timeTracking();
+  let report = reportFor(snap, clone(snap), {});
+  assert.match(report, /Time tracking settings are identical/);
+  assert.doesNotMatch(report, /Time Tracking Configuration: Differences found/);
+
+  const target = clone(snap);
+  target.timeTrackingConfig.options.workingHoursPerDay = 7.5;
+  target.timeTrackingConfig.configuration = { key: "is.origo.jira.tempo-plugin__timetracking-provider", name: "Tempo" };
+  report = reportFor(snap, target, {});
+  assert.match(report, /workingHoursPerDay:\n\s+Source: 8\n\s+Target: 7.5/);
+  assert.match(report, /selected provider:/);
+  assert.match(report, /Time Tracking Configuration: Differences found/);
+});
+
+test("projects: target-only projects stop the 'identical' line", () => {
+  const snap = fullSnapshot();
+  const target = clone(snap);
+  target.issueHierarchy.push({ projectKey: "XYZ", projectName: "Extra", projectType: "software" });
+  const report = reportFor(snap, target, {});
+  assert.doesNotMatch(report, /Project hierarchies are identical/);
+  assert.match(reportFor(snap, clone(snap), {}), /Project hierarchies are identical/);
+});

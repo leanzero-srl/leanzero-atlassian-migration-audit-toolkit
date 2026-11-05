@@ -15,7 +15,7 @@ A comprehensive Node.js script to compare configurations between source and targ
 
 ## Prerequisites
 
-- Node.js 14.0 or higher
+- Node.js 18.0 or higher
 - npm package manager
 - JIRA Cloud API token for both instances
 - Valid email address associated with the API token

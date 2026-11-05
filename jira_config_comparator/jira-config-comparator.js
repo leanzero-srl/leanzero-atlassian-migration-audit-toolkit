@@ -833,9 +833,10 @@ class JIRAConfigComparator {
   }
 
   // Get issue hierarchy (project configurations)
-  // onlyKeys: analyse just these project keys (the target side passes the source's
-  // keys, so both sides look at the same projects even past the 100-project cap).
-  async getIssueHierarchy(baseUrl, onlyKeys = null) {
+  // priorityKeys: analyse these project keys first (the target side passes the
+  // source's keys, so both sides look at the same projects even past the
+  // 100-project cap; target-only projects still fill the rest of the window).
+  async getIssueHierarchy(baseUrl, priorityKeys = null) {
     // Get all projects (this endpoint returns a direct array, not paginated)
     const projects = await this.makeApiCall(baseUrl, "/rest/api/3/project");
     if (!projects) return null;
@@ -850,8 +851,13 @@ class JIRAConfigComparator {
           project.key &&
           project.name &&
           !project.archived &&
-          project.projectTypeKey !== "template" &&
-          (!onlyKeys || onlyKeys.has(project.key)),
+          project.projectTypeKey !== "template",
+      )
+      // Stable sort: priority keys first, API order otherwise
+      .sort(
+        (a, b) =>
+          (priorityKeys && priorityKeys.has(b.key) ? 1 : 0) -
+          (priorityKeys && priorityKeys.has(a.key) ? 1 : 0),
       )
       .slice(0, 100); // Reasonable limit for comparison
 
@@ -1512,8 +1518,14 @@ class JIRAConfigComparator {
   // difference); the rest pair by fewest differing fields; whatever is left over is
   // genuinely missing in target (source side) or extra in target (target side).
   pairItems(sourceGroup, targetGroup, itemType = "") {
+    // scope.type (PROJECT = team-managed, absent = site-wide) is part of the
+    // identity; the scoped project id is not, as it differs between sites.
+    const scopeType = (item) => (item && item.scope && item.scope.type) || "GLOBAL";
     const signature = (item) =>
-      this.stableStringify(this.cleanItemEnhanced(item, itemType));
+      this.stableStringify({
+        scopeType: scopeType(item),
+        item: this.cleanItemEnhanced(item, itemType),
+      });
     const targetSigs = targetGroup.map(signature);
     const usedTarget = new Set();
     const pairs = [];
@@ -1540,14 +1552,20 @@ class JIRAConfigComparator {
         candidates.push({
           si,
           ti,
-          score: this.countDifferingFields(sItem, tItem, itemType),
+          // A different scope type is a worse match than any field difference
+          score:
+            this.countDifferingFields(sItem, tItem, itemType) +
+            (scopeType(sItem) === scopeType(tItem) ? 0 : 1000),
         });
       });
     });
     candidates.sort((a, b) => a.score - b.score);
     const usedSource = new Set();
-    for (const { si, ti } of candidates) {
+    for (const { si, ti, score } of candidates) {
       if (usedSource.has(si) || usedTarget.has(ti)) continue;
+      // Never pair a site-wide item with a team-managed one: that is a missing
+      // item plus an extra item, not a field difference.
+      if (score >= 1000) continue;
       usedSource.add(si);
       usedTarget.add(ti);
       pairs.push([leftoverSource[si], targetGroup[ti]]);
@@ -2395,22 +2413,35 @@ class JIRAConfigComparator {
     return output.join("\n");
   }
 
-  // Key time tracking fields that differ, as "section.field" paths.
+  // Time tracking settings that differ, as {field, source, target}. Shapes on Jira
+  // Cloud: /configuration/timetracking -> the selected provider {key, name};
+  // /options -> {workingHoursPerDay, workingDaysPerWeek, timeFormat, defaultUnit};
+  // /list -> every available provider [{key, name}].
   getTimeTrackingDifferences() {
     const src = this.sourceConfig.timeTrackingConfig;
     const tgt = this.targetConfig.timeTrackingConfig;
-    if (!src || !tgt) return src || tgt ? ["timeTrackingConfig"] : [];
-    const checks = {
-      configuration: ["workingDaysPerWeek", "workingHoursPerDay", "timeTrackingEnabled"],
-      options: ["defaultUnit", "timeFormat"],
-      list: ["fieldConfigurationId", "fieldId"],
-    };
+    if (!src || !tgt) {
+      return src || tgt
+        ? [{ field: "timeTrackingConfig", source: !!src, target: !!tgt }]
+        : [];
+    }
+    const providerKeys = (list) =>
+      Array.isArray(list) ? list.map((p) => p && p.key).sort() : list;
+    const checks = [
+      ["selected provider", (c) => c.configuration && c.configuration.key],
+      ["workingHoursPerDay", (c) => c.options && c.options.workingHoursPerDay],
+      ["workingDaysPerWeek", (c) => c.options && c.options.workingDaysPerWeek],
+      ["timeFormat", (c) => c.options && c.options.timeFormat],
+      ["defaultUnit", (c) => c.options && c.options.defaultUnit],
+      ["available providers", (c) => providerKeys(c.list)],
+    ];
     const diffs = [];
-    for (const [part, fields] of Object.entries(checks)) {
-      if (!src[part] || !tgt[part]) continue;
-      fields.forEach((f) => {
-        if (src[part][f] !== tgt[part][f]) diffs.push(`${part}.${f}`);
-      });
+    for (const [field, get] of checks) {
+      const sv = get(src);
+      const tv = get(tgt);
+      if (this.stableStringify(sv) !== this.stableStringify(tv)) {
+        diffs.push({ field, source: sv, target: tv });
+      }
     }
     return diffs;
   }
@@ -2446,82 +2477,15 @@ class JIRAConfigComparator {
       return output.join("\n");
     }
 
-    // Compare main configuration
-    output.push("\n📋 Main Configuration:");
-    if (sourceTimeTracking.configuration && targetTimeTracking.configuration) {
-      const sourceConfig = sourceTimeTracking.configuration;
-      const targetConfig = targetTimeTracking.configuration;
-
-      // Compare key settings
-      const keyFields = [
-        "workingDaysPerWeek",
-        "workingHoursPerDay",
-        "timeTrackingEnabled",
-      ];
-
-      keyFields.forEach((field) => {
-        if (sourceConfig[field] !== targetConfig[field]) {
-          output.push(`   ⚠️  ${field}:`);
-          output.push(`     Source: ${JSON.stringify(sourceConfig[field])}`);
-          output.push(`     Target: ${JSON.stringify(targetConfig[field])}`);
-        }
+    const diffs = this.getTimeTrackingDifferences();
+    if (diffs.length === 0) {
+      output.push("✅ Time tracking settings are identical");
+    } else {
+      diffs.forEach(({ field, source, target }) => {
+        output.push(`   ⚠️  ${field}:`);
+        output.push(`     Source: ${JSON.stringify(source)}`);
+        output.push(`     Target: ${JSON.stringify(target)}`);
       });
-
-      if (
-        keyFields.every((field) => sourceConfig[field] === targetConfig[field])
-      ) {
-        output.push("   ✅ Main time tracking settings are identical");
-      }
-    }
-
-    // Compare options
-    output.push("\n📋 Time Tracking Options:");
-    if (sourceTimeTracking.options && targetTimeTracking.options) {
-      const sourceOptions = sourceTimeTracking.options;
-      const targetOptions = targetTimeTracking.options;
-
-      // Compare option settings
-      const optionFields = ["defaultUnit", "timeFormat"];
-
-      optionFields.forEach((field) => {
-        if (sourceOptions[field] !== targetOptions[field]) {
-          output.push(`   ⚠️  ${field}:`);
-          output.push(`     Source: ${JSON.stringify(sourceOptions[field])}`);
-          output.push(`     Target: ${JSON.stringify(targetOptions[field])}`);
-        }
-      });
-
-      if (
-        optionFields.every(
-          (field) => sourceOptions[field] === targetOptions[field],
-        )
-      ) {
-        output.push("   ✅ Time tracking options are identical");
-      }
-    }
-
-    // Compare list configuration
-    output.push("\n📋 List Configuration:");
-    if (sourceTimeTracking.list && targetTimeTracking.list) {
-      const sourceList = sourceTimeTracking.list;
-      const targetList = targetTimeTracking.list;
-
-      // Compare list settings
-      const listFields = ["fieldConfigurationId", "fieldId"];
-
-      listFields.forEach((field) => {
-        if (sourceList[field] !== targetList[field]) {
-          output.push(`   ⚠️  ${field}:`);
-          output.push(`     Source: ${JSON.stringify(sourceList[field])}`);
-          output.push(`     Target: ${JSON.stringify(targetList[field])}`);
-        }
-      });
-
-      if (
-        listFields.every((field) => sourceList[field] === targetList[field])
-      ) {
-        output.push("   ✅ Time tracking list configuration is identical");
-      }
     }
 
     return output.join("\n");

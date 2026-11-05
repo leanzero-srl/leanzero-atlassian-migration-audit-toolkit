@@ -108,18 +108,23 @@ function matchFields(dc, cloud) {
   const migratedCandidates = (d) => {
     const t = stripMig(d.name);
     let out = [];
-    for (const [k, arr] of byName) if (stripMig(k) === t) out = out.concat(arr);
+    // Names that equal the DC name only once "(migrated)" is stripped; exact-name
+    // matches are their own passes.
+    for (const [k, arr] of byName) {
+      if (stripMig(k) === t && k !== norm(d.name)) out = out.concat(arr);
+    }
     return out;
   };
   const sameType = (d) => (c) => fType(c) === fType(d);
 
   // Passes, strongest evidence first, so a weaker match never takes a Cloud field
-  // a stronger one needs: exact name + same type, exact name, "(migrated)" name +
-  // same type, "(migrated)" name.
+  // a stronger one needs: exact name + same type, "(migrated)" name + same type,
+  // exact name, "(migrated)" name. Type before name: JCMA renames a DC "Team" to
+  // "Team (migrated)" when Cloud already has its own native "Team".
   const passes = [
     { how: "exact name", group: (d) => byName.get(norm(d.name)) || [], typed: true },
-    { how: "exact name", group: (d) => byName.get(norm(d.name)) || [], typed: false },
     { how: "name (ignoring (migrated))", group: migratedCandidates, typed: true },
+    { how: "exact name", group: (d) => byName.get(norm(d.name)) || [], typed: false },
     { how: "name (ignoring (migrated))", group: migratedCandidates, typed: false },
   ];
   const result = new Map(); // DC field -> row

@@ -50,3 +50,14 @@ test("exact-name matches are not stolen by a (migrated) fallback", () => {
   assert.deepEqual(mapped.map((r) => r.dcId), ["customfield_2"]);
   assert.deepEqual(unmapped.map((r) => r.dcId), ["customfield_1"]);
 });
+
+test("JCMA rename: DC Team maps to Cloud 'Team (migrated)' of the same type, not the native Team", () => {
+  const RM = "com.atlassian.teams:rm-teams-custom-field-team";
+  const NATIVE = "com.atlassian.jira.plugin.system.customfieldtypes:atlassian-team";
+  const dc = [f("customfield_12000", "Team", RM)];
+  const cloud = [f("customfield_10001", "Team", NATIVE), f("customfield_10500", "Team (migrated)", RM)];
+  const { mapped, unmapped } = matchFields(dc, cloud);
+  assert.equal(unmapped.length, 0);
+  assert.equal(mapped[0].cloudId, "customfield_10500");
+  assert.equal(mapped[0].note, "");
+});
