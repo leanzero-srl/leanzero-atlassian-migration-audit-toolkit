@@ -394,3 +394,15 @@ test("projects: target-only projects stop the 'identical' line", () => {
   assert.doesNotMatch(report, /Project hierarchies are identical/);
   assert.match(reportFor(snap, clone(snap), {}), /Project hierarchies are identical/);
 });
+
+test("twins: a change on one of several identical items is attributed to the right id", () => {
+  const c = makeComparator();
+  const twin = (id, p) => ({ id, name: "Bug", description: "", scope: { type: "PROJECT", project: { id: p } } });
+  const src = [twin("10652", "1"), twin("10700", "2"), twin("10701", "3")];
+  const tgt = clone(src);
+  tgt[0].description = "changed";
+  const r = c.compareLists(src, tgt, "name", "name", "issueType");
+  assert.equal(r.differences.length, 1);
+  assert.equal(r.differences[0].sourceId, "10652");
+  assert.equal(r.differences[0].targetId, "10652");
+});

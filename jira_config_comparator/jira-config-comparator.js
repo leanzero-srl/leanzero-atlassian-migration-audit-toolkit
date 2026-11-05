@@ -1531,8 +1531,31 @@ class JIRAConfigComparator {
     const pairs = [];
     const leftoverSource = [];
 
+    // Same id first: among indistinguishable twins this keeps the reported ids
+    // right when ids are shared (same site, or a migration that kept them).
+    const sameId = (a, b) =>
+      a.id !== undefined && this.stableStringify(a.id) === this.stableStringify(b.id);
+    const byId = new Map();
+    sourceGroup.forEach((sItem) => {
+      const j = targetGroup.findIndex(
+        (tItem, idx) => !usedTarget.has(idx) && sameId(sItem, tItem),
+      );
+      if (j >= 0) {
+        usedTarget.add(j);
+        byId.set(sItem, j);
+      }
+    });
+
     sourceGroup.forEach((sItem) => {
       const sig = signature(sItem);
+      if (byId.has(sItem)) {
+        const j = byId.get(sItem);
+        if (targetSigs[j] === sig) {
+          pairs.push([sItem, targetGroup[j]]);
+          return;
+        }
+        usedTarget.delete(j); // same id but changed: release it for closest pairing
+      }
       const j = targetSigs.findIndex(
         (tSig, idx) => !usedTarget.has(idx) && tSig === sig,
       );
